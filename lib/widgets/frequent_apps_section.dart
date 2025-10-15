@@ -6,18 +6,31 @@ import 'package:glitter_launcher/widgets/app_grid_item.dart';
 
 import '../database/database.dart';
 
-class FrequentAppsSection extends StatelessWidget {
+class FrequentAppsSection extends StatefulWidget {
   const FrequentAppsSection({super.key});
 
   @override
+  State<FrequentAppsSection> createState() => _FrequentAppsSectionState();
+}
+
+class _FrequentAppsSectionState extends State<FrequentAppsSection>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
   Widget build(BuildContext context) {
+    super.build(context);
     final appCtrl = Get.find<AppController>();
     return FutureBuilder<List<App>>(
       future: appCtrl.getFrequentApps(),
       builder: (context, snapshot) {
         if (!snapshot.hasData || snapshot.data!.isEmpty) {
           return const Center(
-            child: Text('No frequent apps yet', style: TextStyle(color: Colors.white)),
+            child: Text(
+              'No frequent apps yet',
+              style: TextStyle(color: Colors.white),
+            ),
           );
         }
         return Padding(
@@ -27,7 +40,9 @@ class FrequentAppsSection extends StatelessWidget {
             mainAxisSpacing: 12,
             crossAxisSpacing: 12,
             itemCount: snapshot.data!.length,
-            itemBuilder: (context, index) => AppGridItem(app: snapshot.data![index]),
+            cacheExtent: 500, // Cache for perf
+            itemBuilder: (context, index) =>
+                AppGridItem(app: snapshot.data![index]),
           ),
         );
       },

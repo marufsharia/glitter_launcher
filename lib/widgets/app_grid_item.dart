@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data'; // Import Uint8List
 
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
@@ -44,7 +45,6 @@ class AppGridItem extends StatelessWidget {
               ),
             ],
           ),
-          // ✅ FIX: Constrain Column to available space using Flexible + Safe Text Size
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             mainAxisSize: MainAxisSize.max,
@@ -59,7 +59,7 @@ class AppGridItem extends StatelessWidget {
                     shape: BoxShape.circle,
                     border: Border.all(color: Colors.white.withOpacity(0.3)),
                   ),
-                  child: ClipOval(child: _buildAppIcon()),
+                  child: ClipOval(child: _buildAppIcon(appCtrl)),
                 ).animate().scale(duration: 200.ms, curve: Curves.elasticOut),
               ),
               const SizedBox(height: 6),
@@ -71,7 +71,7 @@ class AppGridItem extends StatelessWidget {
                     style: Get.textTheme.bodyMedium?.copyWith(
                       color: Colors.white,
                       fontWeight: FontWeight.w500,
-                      fontSize: 11, // ✅ slightly smaller
+                      fontSize: 11,
                     ),
                     textAlign: TextAlign.center,
                     overflow: TextOverflow.ellipsis,
@@ -86,16 +86,16 @@ class AppGridItem extends StatelessWidget {
     );
   }
 
-  Widget _buildAppIcon() {
-    try {
-      if (app.customIconPath?.isNotEmpty ?? false) {
-        return Image.file(File(app.customIconPath!), fit: BoxFit.contain);
-      }
-      if (app.icon?.isNotEmpty ?? false) {
-        return Image.memory(app.icon!, fit: BoxFit.contain);
-      }
-    } catch (_) {}
-    return const Icon(Icons.apps, color: Colors.white, size: 30);
+  // Use the AppController's caching mechanism
+  Widget _buildAppIcon(AppController appCtrl) {
+    return Image(
+      image: appCtrl.getAppIcon(app.packageName, app.icon, app.customIconPath),
+      fit: BoxFit.contain,
+      errorBuilder: (context, error, stackTrace) {
+        // Fallback to a default icon if loading fails
+        return const Icon(Icons.apps, color: Colors.white, size: 30);
+      },
+    );
   }
 
   void _showAppOptions(BuildContext context) {
@@ -111,7 +111,14 @@ class AppGridItem extends StatelessWidget {
           ListTile(
             leading: const Icon(Icons.edit),
             title: const Text('Rename App'),
-            onTap: () => Navigator.pop(context),
+            onTap: () {
+              Navigator.pop(context);
+              // TODO: Implement rename functionality (e.g., show a dialog)
+              Get.snackbar(
+                'Coming Soon',
+                'Rename app functionality is not yet implemented.',
+              );
+            },
           ),
           ListTile(
             leading: const Icon(Icons.image),
@@ -122,12 +129,67 @@ class AppGridItem extends StatelessWidget {
             },
           ),
           ListTile(
-            leading: const Icon(Icons.delete),
-            title: const Text('Uninstall'),
-            onTap: () {},
+            leading: const Icon(Icons.visibility_off),
+            title: Text(app.isHidden ? 'Show App' : 'Hide App'),
+            onTap: () {
+              Navigator.pop(context);
+              appCtrl.toggleHide(app.packageName);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.category),
+            title: const Text('Change Category'),
+            onTap: () {
+              Navigator.pop(context);
+              _showCategoryPicker(context, appCtrl);
+            },
+          ),
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.delete_forever, color: Colors.redAccent),
+            title: const Text(
+              'Uninstall',
+              style: TextStyle(color: Colors.redAccent),
+            ),
+            onTap: () {
+              Navigator.pop(context);
+              appCtrl.uninstallApp(app.packageName);
+            },
           ),
         ],
       ),
+    );
+  }
+
+  void _showCategoryPicker(BuildContext context, AppController appCtrl) {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        return Obx(
+          () => ListView.builder(
+            shrinkWrap: true,
+            itemCount: appCtrl.categories.length,
+            itemBuilder: (context, index) {
+              final category = appCtrl.categories[index];
+              if (category == 'All' || category == 'Frequent')
+                return const SizedBox.shrink(); // Exclude these
+              return ListTile(
+                title: Text(category),
+                trailing: app.category == category
+                    ? const Icon(Icons.check)
+                    : null,
+                onTap: () {
+                  appCtrl.changeCategory(
+                    app.packageName,
+                    category == 'Uncategorized' ? null : category,
+                  );
+                  Navigator.pop(context);
+                },
+              );
+            },
+          ),
+        );
+      },
     );
   }
 }

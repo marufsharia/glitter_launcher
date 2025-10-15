@@ -24,7 +24,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   final appCtrl = Get.find<AppController>();
   final themeCtrl = Get.find<ThemeController>();
   final ScrollController _scrollController = ScrollController();
-  final ScrollController _gridCtrl = ScrollController();
+
+  // final ScrollController _gridCtrl = ScrollController(); // Not used in current setup
 
   @override
   void initState() {
@@ -33,6 +34,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       length: appCtrl.categories.length,
       vsync: this,
     );
+    // Listen to tab changes and update selectedCategory in controller
+    _tabController.addListener(() {
+      if (!_tabController.indexIsChanging) {
+        appCtrl.selectedCategory.value =
+            appCtrl.categories[_tabController.index];
+      }
+    });
   }
 
   @override
@@ -45,7 +53,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     final primary = themeCtrl.primaryColor.value;
-    final appNames = appCtrl.allApps.map((a) => a.appName).toList()..sort();
+    // Removed appNames for AlphabetScrollbar as it's commented out
+    // final appNames = appCtrl.allApps.map((a) => a.appName).toList()..sort();
+
     return Scaffold(
       drawer: const SettingsDrawer(),
       body: Stack(
@@ -156,35 +166,36 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                       const SizedBox(height: 14),
 
                       // Category Tabs
-                      TabBar(
-                        controller: _tabController,
-                        isScrollable: true,
-                        labelColor: Colors.white,
-                        unselectedLabelColor: Colors.white70,
-                        indicator: BoxDecoration(
-                          color: primary.withOpacity(0.3),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(
-                            color: Colors.white.withOpacity(0.3),
+                      Obx(
+                        () => TabBar(
+                          controller: _tabController,
+                          isScrollable: true,
+                          labelColor: Colors.white,
+                          unselectedLabelColor: Colors.white70,
+                          indicator: BoxDecoration(
+                            color: primary.withOpacity(0.3),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(
+                              color: Colors.white.withOpacity(0.3),
+                            ),
                           ),
-                        ),
-                        labelPadding: const EdgeInsets.symmetric(
-                          horizontal: 18,
-                          vertical: 8,
-                        ),
-                        onTap: (i) => appCtrl.selectedCategory.value =
-                            appCtrl.categories[i],
-                        tabs: appCtrl.categories
-                            .map(
-                              (cat) => Text(
-                                cat,
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w600,
+                          labelPadding: const EdgeInsets.symmetric(
+                            horizontal: 18,
+                            vertical: 8,
+                          ),
+                          // The listener in initState handles the onTap logic now
+                          tabs: appCtrl.categories
+                              .map(
+                                (cat) => Text(
+                                  cat,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
-                              ),
-                            )
-                            .toList(),
-                      ).animate().fadeIn(duration: 100.ms).slideY(begin: 0.2),
+                              )
+                              .toList(),
+                        ).animate().fadeIn(duration: 100.ms).slideY(begin: 0.2),
+                      ),
                     ],
                   ),
                 ),
@@ -193,7 +204,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               // Grid or Frequent Section
               SliverFillRemaining(
                 child: Obx(() {
-                  if (appCtrl.isLoading.value) {
+                  if (appCtrl.isLoading.value && appCtrl.allApps.isEmpty) {
                     return const Center(
                       child: CircularProgressIndicator(color: Colors.white),
                     );
@@ -203,7 +214,24 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                     return const FrequentAppsSection();
                   }
 
-                  final filteredApps = appCtrl.getFilteredApps();
+                  // Use the pre-filtered and sorted list from the controller
+                  final filteredApps = appCtrl.filteredAndSortedApps;
+
+                  if (filteredApps.isEmpty && !appCtrl.isLoading.value) {
+                    return Center(
+                      child: Text(
+                        appCtrl.searchQuery.value.isNotEmpty
+                            ? 'No apps found matching "${appCtrl.searchQuery.value}"'
+                            : 'No apps in this category.',
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 16,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    );
+                  }
+
                   return Padding(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 16,
@@ -216,10 +244,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                       itemCount: filteredApps.length,
                       itemBuilder: (context, index) {
                         final app = filteredApps[index];
-                        return AppGridItem(app: app)
-                            .animate()
-                            .fadeIn(delay: (index * 40).ms)
-                            .slideY(begin: 0.2, duration: 400.ms);
+                        return AppGridItem(app: app);
+                        //.animate()
+                        // .fadeIn(delay: (index * 40).ms)
+                        // .slideY(begin: 0.2, duration: 100.ms);
                       },
                     ),
                   );
@@ -228,27 +256,16 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             ],
           ),
 
-          // Floating alphabet index
-          /*   Stack(
-            children: [
-              GridView.builder(
-                controller: _gridCtrl,
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 4,
-                  mainAxisSpacing: 12,
-                  crossAxisSpacing: 12,
-                  childAspectRatio: 0.8,
-                ),
-                itemCount: appCtrl.allApps.length,
-                itemBuilder: (context, index) =>
-                    AppGridItem(app: appCtrl.allApps[index]),
-              ),
-              AlphabetScrollbar(
-                scrollController: _gridCtrl,
-                appNames: appNames,
-              ),
-            ],
-          ),*/
+          // Floating alphabet index - Re-enable and adapt if needed
+          /*
+          // You would need to make sure _gridCtrl is correctly attached to the MasonryGridView
+          // and the MasonryGridView is inside a Scrollable or using a CustomScrollView to integrate it.
+          // This also assumes appNames is available and sorted.
+          AlphabetScrollbar(
+            scrollController: _scrollController, // Or a dedicated scroll controller for the grid
+            appNames: appNames, // Make sure appNames is updated correctly with filtered apps
+          ),
+          */
         ],
       ),
     );

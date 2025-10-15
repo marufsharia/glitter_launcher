@@ -1,11 +1,13 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
-import 'package:drift/drift.dart'
-    as drift; // Alias to avoid conflict with GetX's Value
+import 'package:drift/drift.dart' as drift;
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:glitter_launcher/database/database.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:installed_apps/app_info.dart';
 import 'package:installed_apps/installed_apps.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:wallpaper_manager_flutter/wallpaper_manager_flutter.dart';
@@ -13,6 +15,12 @@ import 'package:wallpaper_manager_flutter/wallpaper_manager_flutter.dart';
 class AppController extends GetxController {
   final AppDatabase db = Get.find<AppDatabase>();
   var allApps = <App>[].obs;
+
+  // ✅ FIXED: Proper persistent RxList (was getter returning new instance!)
+  final RxList<App> filteredAndSortedApps = <App>[].obs;
+
+  // In-memory cache for app icons
+  final Map<String, ImageProvider> _appIconCache = {};
 
   var categories = <String>[
     'All',
@@ -23,103 +31,158 @@ class AppController extends GetxController {
     'Uncategorized',
   ].obs;
   var selectedCategory = 'All'.obs;
-  var gridCount = 4.obs; // Customizable grid columns
+  var gridCount = 4.obs;
   var isLoading = true.obs;
   var searchQuery = ''.obs;
-  var sortBy = 'Name'.obs; // 'Name', 'Usage', 'Last Used'
+  var sortBy = 'Name'.obs;
   var wallpaperPath = ''.obs;
+
+  // Debouncer for search input
+  final _searchDebouncer = Debouncer(milliseconds: 300);
 
   @override
   void onInit() {
     super.onInit();
     _requestPermissions();
-    loadInstalledApps();
-    //debugLoadApps();
-
     _loadWallpaperPath();
+
+    // ✅ Listen to DB stream for automatic allApps updates
+    db.getAllAppsStream().listen((data) {
+      allApps.assignAll(data);
+      _appIconCache.clear(); // Clear icon cache on full reload
+      _applyFiltersAndSort();
+    });
+
+    loadInstalledApps(); // Initial load
   }
 
-  Future<void> debugLoadApps() async {
-    isLoading.value = true;
-    try {
-      final installedApps = await InstalledApps.getInstalledApps(false, true);
-      //print('Found ${installedApps.length} apps');
+  @override
+  void onReady() {
+    super.onReady();
+    // ✅ React to changes in dependencies
+    everAll([allApps, selectedCategory, searchQuery, sortBy], (_) {
+      _applyFiltersAndSort();
+    });
+  }
 
-      if (installedApps.isEmpty) {
-        Get.snackbar(
-          'Warning',
-          'No apps found. Check AndroidManifest.xml <queries> tag.',
-        );
-      }
-
-      // ... rest of your logic
-    } catch (e, stack) {
-      print('Error loading apps: $e\n$stack');
-      Get.snackbar('Error', 'Failed to load apps: $e');
-    } finally {
-      isLoading.value = false;
+  // --- ICON CACHING ---
+  ImageProvider getAppIcon(
+    String packageName,
+    Uint8List? iconBytes,
+    String? customIconPath,
+  ) {
+    if (_appIconCache.containsKey(packageName)) {
+      return _appIconCache[packageName]!;
     }
+
+    ImageProvider imageProvider;
+    if (customIconPath?.isNotEmpty ?? false) {
+      imageProvider = FileImage(File(customIconPath!));
+    } else if (iconBytes != null && iconBytes.isNotEmpty) {
+      imageProvider = MemoryImage(iconBytes);
+    } else {
+      imageProvider = const AssetImage('assets/default_app_icon.png');
+    }
+    _appIconCache[packageName] = imageProvider;
+    return imageProvider;
   }
 
+  void clearAppIconCache(String packageName) {
+    _appIconCache.remove(packageName);
+  }
+
+  // --- APP LOADING & SYNC ---
   Future<void> loadInstalledApps() async {
-    isLoading.value = true;
+    if (!isLoading.value) isLoading.value = true;
     try {
-      // Only user-installed apps
-      final installedApps = await InstalledApps.getInstalledApps(
-        false, // include system apps? false = no
-        false, // include launch intent? true = yes (we still want)
-      );
+      final installedApps =
+          await InstalledApps.getInstalledApps(
+            excludeNonLaunchableApps: true,
+            excludeSystemApps: true,
+            withIcon: true,
+            platformType: PlatformType.nativeOrOthers,
+          ).catchError((error, stack) {
+            print("❌ InstalledApps error: $error");
+            return <AppInfo>[];
+          });
 
-      if (installedApps.isEmpty) {
-        Get.snackbar(
-          'No Apps Found',
-          'Check AndroidManifest.xml for <queries> tag',
-          snackPosition: SnackPosition.BOTTOM,
-        );
-      }
+      final existingDbApps = await db.getAllApps();
+      final existingDbMap = {
+        for (var app in existingDbApps) app.packageName: app,
+      };
+      final packageNamesFromPackageManager = installedApps
+          .map((e) => e.packageName)
+          .toSet();
 
-      int inserted = 0, updated = 0;
-      for (var appInfo in installedApps) {
-        final existing =
-            await (db.select(db.apps)
-                  ..where((a) => a.packageName.equals(appInfo.packageName)))
-                .getSingleOrNull();
+      final appsToInsert = <AppsCompanion>[];
+      final appsToUpdate = <String, AppsCompanion>{};
+
+      // Process installed apps
+      for (final appInfo in installedApps) {
+        final existing = existingDbMap[appInfo.packageName];
+        final Uint8List iconData = appInfo.icon ?? Uint8List(0);
 
         if (existing == null) {
-          await db
-              .into(db.apps)
-              .insert(
-                AppsCompanion.insert(
-                  packageName: appInfo.packageName,
-                  appName: appInfo.name,
-                  category: drift.Value(
-                    _categorizeApp(appInfo.name.toLowerCase()),
-                  ),
-                  icon: drift.Value(appInfo.icon ?? drift.Uint8List(0)),
-                ),
-              );
-          inserted++;
-        } else if (existing.icon == null && appInfo.icon != null) {
-          await (db.update(db.apps)
-                ..where((a) => a.packageName.equals(appInfo.packageName)))
-              .write(AppsCompanion(icon: drift.Value(appInfo.icon)));
-          updated++;
+          appsToInsert.add(
+            AppsCompanion.insert(
+              packageName: appInfo.packageName,
+              appName: appInfo.name,
+              category: drift.Value(_categorizeApp(appInfo.name.toLowerCase())),
+              icon: drift.Value(iconData),
+            ),
+          );
+        } else {
+          final updatedCompanion = AppsCompanion(
+            appName: drift.Value(appInfo.name),
+            icon:
+                (existing.icon == null || existing.icon!.isEmpty) &&
+                    iconData.isNotEmpty
+                ? drift.Value(iconData)
+                : const drift.Value.absent(),
+          );
+
+          if (updatedCompanion.appName.value != existing.appName ||
+              updatedCompanion.icon.present) {
+            appsToUpdate[appInfo.packageName] = updatedCompanion;
+          }
         }
       }
 
-      allApps.value = await db.getAllApps();
-      print(
-        "✅ Database updated: $inserted new, $updated icons updated. Total apps: ${allApps.length}",
-      );
+      // Remove uninstalled apps
+      final appsToDelete = existingDbApps
+          .where(
+            (dbApp) =>
+                !packageNamesFromPackageManager.contains(dbApp.packageName),
+          )
+          .toList();
 
-      selectedCategory.refresh();
+      if (appsToDelete.isNotEmpty) {
+        for (final app in appsToDelete) {
+          await db.deleteAppByPackage(app.packageName);
+          clearAppIconCache(app.packageName);
+        }
+      }
+
+      // Batch operations
+      if (appsToInsert.isNotEmpty) {
+        await db.batchInsertApps(appsToInsert);
+      }
+      if (appsToUpdate.isNotEmpty) {
+        for (var entry in appsToUpdate.entries) {
+          await (db.update(
+            db.apps,
+          )..where((a) => a.packageName.equals(entry.key))).write(entry.value);
+          if (entry.value.icon.present) {
+            clearAppIconCache(entry.key);
+          }
+        }
+      }
     } catch (e, stack) {
-      print("❌ Error in loadInstalledApps: $e\n$stack");
+      print("❌ Critical error: $e\n$stack");
       Get.snackbar(
-        'Load Failed',
-        'Could not load apps: ${e.toString()}',
-        backgroundColor: Colors.red.withOpacity(0.8),
-        colorText: Colors.white,
+        'Load Error',
+        'Failed to load apps. Showing cached data.',
+        duration: const Duration(seconds: 5),
       );
     } finally {
       isLoading.value = false;
@@ -132,57 +195,58 @@ class AppController extends GetxController {
         name.contains('instagram') ||
         name.contains('twitter') ||
         name.contains('whatsapp') ||
-        name.contains('messenger')) {
+        name.contains('messenger') ||
+        name.contains('telegram') ||
+        name.contains('tiktok')) {
       return 'Social';
     }
     if (name.contains('notes') ||
         name.contains('todo') ||
         name.contains('office') ||
+        name.contains('calendar') ||
+        name.contains('mail') ||
+        name.contains('drive') ||
+        name.contains('docs') ||
         name.contains('calculator') ||
         name.contains('document') ||
         name.contains('pdf')) {
       return 'Productivity';
     }
-
     return 'Uncategorized';
   }
 
+  // --- USER ACTIONS (NO FULL RELOADS!) ---
   Future<void> launchApp(String packageName) async {
     final result = await InstalledApps.startApp(packageName);
     if (result == true) {
       await db.updateUsage(packageName);
-      loadInstalledApps(); // Refresh usage
+      // Stream auto-updates UI
     }
   }
 
   Future<void> pickCustomIcon(String packageName) async {
-    final picker = ImagePicker();
-    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
-    if (pickedFile != null) {
-      await db.updateCustomIcon(packageName, pickedFile.path);
-      loadInstalledApps();
+    final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+    if (picked != null) {
+      await db.updateCustomIcon(packageName, picked.path);
+      clearAppIconCache(packageName);
     }
   }
 
   Future<void> changeCategory(String packageName, String? category) async {
     await db.updateCategory(packageName, category);
-    loadInstalledApps();
   }
 
   Future<void> toggleHide(String packageName) async {
-    final app = allApps.firstWhere((a) => a.packageName == packageName);
-    await db.hideApp(packageName, !app.isHidden);
-    loadInstalledApps();
+    final app = allApps.firstWhereOrNull((a) => a.packageName == packageName);
+    if (app != null) {
+      await db.hideApp(packageName, !app.isHidden);
+    }
   }
 
-  // In AppController, replace these methods:
-
+  // --- FILTERING & SORTING ---
   List<App> getAppsInCategory() {
-    // Ensure allApps is never null and handle empty case
     final appsList = allApps.value;
-    if (appsList.isEmpty) {
-      return [];
-    }
+    if (appsList.isEmpty) return [];
 
     if (selectedCategory.value == 'All') {
       return appsList.where((a) => !a.isHidden).toList();
@@ -203,158 +267,149 @@ class AppController extends GetxController {
     }
   }
 
-  List<App> getFilteredApps() {
-    try {
-      var apps = getAppsInCategory();
-      if (apps.isEmpty) {
-        return [];
-      }
-
-      // Search filter
-      if (searchQuery.value.isNotEmpty) {
-        apps = apps
-            .where(
-              (a) => a.appName.toLowerCase().contains(
-                searchQuery.value.toLowerCase(),
-              ),
-            )
-            .toList();
-      }
-
-      // Sort with null safety
-      switch (sortBy.value) {
-        case 'Usage':
-          apps.sort((a, b) => (b.usageCount).compareTo(a.usageCount));
-          break;
-        case 'Last Used':
-          apps.sort(
-            (a, b) => (b.lastUsed ?? DateTime(2000)).compareTo(
-              a.lastUsed ?? DateTime(2000),
-            ),
-          );
-          break;
-        default:
-          apps.sort((a, b) => a.appName.compareTo(b.appName));
-      }
-
-      return apps;
-    } catch (e) {
-      print('Error in getFilteredApps: $e');
-      return [];
+  void _applyFiltersAndSort() {
+    if (isLoading.value) {
+      filteredAndSortedApps.assignAll([]);
+      return;
     }
+
+    var apps = getAppsInCategory();
+
+    // Apply search
+    if (searchQuery.value.isNotEmpty) {
+      apps = apps
+          .where(
+            (a) => a.appName.toLowerCase().contains(
+              searchQuery.value.toLowerCase(),
+            ),
+          )
+          .toList();
+    }
+
+    // Apply sorting
+    switch (sortBy.value) {
+      case 'Usage':
+        apps.sort((a, b) => b.usageCount.compareTo(a.usageCount));
+        break;
+      case 'Last Used':
+        apps.sort(
+          (a, b) => (b.lastUsed ?? DateTime(2000)).compareTo(
+            a.lastUsed ?? DateTime(2000),
+          ),
+        );
+        break;
+      default: // Name
+        apps.sort((a, b) => a.appName.compareTo(b.appName));
+    }
+
+    filteredAndSortedApps.assignAll(apps); // ✅ Use assignAll for RxList
   }
 
+  // --- FREQUENT APPS ---
   Future<List<App>> getFrequentApps() async {
     return await db.getFrequentApps(10);
   }
 
-  void changeGridCount(int count) {
-    gridCount.value = count;
-  }
+  // --- UI CONTROLS ---
+  void changeGridCount(int count) => gridCount.value = count;
 
   void updateSearch(String query) {
-    searchQuery.value = query;
+    _searchDebouncer.run(() => searchQuery.value = query);
   }
 
-  void updateSort(String sortOption) {
-    sortBy.value = sortOption;
-  }
+  void updateSort(String sortOption) => sortBy.value = sortOption;
 
+  // --- WALLPAPER ---
   Future<void> pickWallpaper() async {
-    final picker = ImagePicker();
-    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
-    if (pickedFile != null) {
-      await setWallpaper(pickedFile.path);
-    }
+    final picked = await ImagePicker().pickImage(source: ImageSource.gallery);
+    if (picked != null) await setWallpaper(picked.path);
   }
 
   Future<void> setWallpaper(String imagePath) async {
     try {
-      final result = await WallpaperManagerFlutter().setWallpaper(
+      if (await WallpaperManagerFlutter().setWallpaper(
         File(imagePath),
         WallpaperManagerFlutter.homeScreen,
-      );
-      if (result) {
+      )) {
         wallpaperPath.value = imagePath;
-        Get.snackbar('Success', 'Wallpaper set successfully!');
+        Get.snackbar('Success', 'Wallpaper set!');
       } else {
         Get.snackbar('Error', 'Failed to set wallpaper');
       }
     } catch (e) {
-      Get.snackbar('Error', 'Failed to set wallpaper: $e');
+      Get.snackbar('Error', 'Wallpaper error: $e');
     }
   }
 
   Future<void> _loadWallpaperPath() async {
-    // Load from shared prefs if needed; for now, default empty
+    // TODO: Load from SharedPreferences
   }
 
   void _requestPermissions() async {
-    await Permission.storage.request();
-    await Permission.manageExternalStorage.request(); // For wallpapers
+    await [Permission.storage, Permission.manageExternalStorage].request();
   }
 
-  /// Try to uninstall an app. If programmatic uninstall fails, remove from
-  /// launcher DB (so it stops showing) and instruct the user.
+  // --- UNINSTALL ---
   Future<void> uninstallApp(String packageName) async {
     final confirmed = await Get.dialog<bool>(
       AlertDialog(
         title: const Text('Uninstall App'),
-        content: const Text('Are you sure you want to uninstall this app?'),
+        content: Text('Uninstall $packageName?'),
         actions: [
           TextButton(
-            onPressed: Navigator.of(Get.context!).pop,
+            onPressed: () => Get.back(result: false),
             child: const Text('Cancel'),
           ),
           TextButton(
-            onPressed: () => Navigator.of(Get.context!).pop(true),
+            onPressed: () => Get.back(result: true),
             child: const Text('Uninstall'),
           ),
         ],
       ),
     );
 
-    if (confirmed != true) return;
-
-    try {
-      // Try to uninstall using installed_apps (some devices/packages may support it)
-      // If InstalledApps.uninstallApp doesn't exist in your version, this will throw and go to catch.
-      final result = await InstalledApps.uninstallApp(packageName);
-      if (result == true) {
-        // If uninstall succeeded, also remove from DB to keep launcher clean
-        await removeAppFromDb(packageName);
-        Get.snackbar('Uninstalled', 'App removed from device.');
-      } else {
-        // Programmatic uninstall didn't succeed; fallback
-        await removeAppFromDb(packageName);
-        Get.snackbar(
-          'Removed from launcher',
-          'Could not uninstall programmatically. Please uninstall from device settings if desired.',
-        );
+    if (confirmed == true) {
+      try {
+        final result = await InstalledApps.uninstallApp(packageName);
+        if (result == true) {
+          Get.snackbar('Success', 'App uninstalled');
+        } else if (result == false) {
+          Get.snackbar('Warning', 'Manual uninstall required');
+        } else {
+          // result == null → e.g., user canceled system dialog, or not supported
+          Get.snackbar('Info', 'Uninstall not completed');
+        }
+      } catch (e) {
+        Get.snackbar('Error', 'Uninstall failed: $e');
+      } finally {
+        loadInstalledApps(); // Re-sync to remove from DB if truly uninstalled
       }
-    } catch (e, st) {
-      print('Uninstall fallback: $e\n$st');
-      // Fallback: remove entry from database so it won't show in launcher,
-      // because some devices don't allow silent / direct uninstall.
-      await removeAppFromDb(packageName);
-      Get.snackbar(
-        'Removed from launcher',
-        'Could not uninstall automatically. Entry removed from launcher. Uninstall via system settings if needed.',
-      );
     }
   }
 
-  /// Remove an app record from the launcher DB and refresh list.
   Future<void> removeAppFromDb(String packageName) async {
     try {
       await (db.delete(
         db.apps,
       )..where((a) => a.packageName.equals(packageName))).go();
+      clearAppIconCache(packageName);
     } catch (e) {
-      print('Error deleting app from DB: $e');
-    } finally {
-      allApps.value = await db.getAllApps();
-      selectedCategory.refresh();
+      Get.snackbar('DB Error', 'Failed to remove app');
     }
   }
+}
+
+// Debouncer for search
+class Debouncer {
+  final int milliseconds;
+  Timer? _timer;
+
+  Debouncer({this.milliseconds = 500});
+
+  run(VoidCallback action) {
+    _timer?.cancel();
+    _timer = Timer(Duration(milliseconds: milliseconds), action);
+  }
+
+  void dispose() => _timer?.cancel();
 }

@@ -1,9 +1,11 @@
+// ... (previous imports and table definition) ...
+
 import 'dart:io';
-import 'dart:typed_data';
+
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 part 'database.g.dart';
 
@@ -12,13 +14,20 @@ part 'database.g.dart';
 // -----------------------------
 class Apps extends Table {
   IntColumn get id => integer().autoIncrement()();
+
   TextColumn get packageName => text()();
+
   TextColumn get appName => text()();
+
   TextColumn get category => text().nullable()(); // Nullable category
   BoolColumn get isHidden => boolean().withDefault(const Constant(false))();
+
   TextColumn get customIconPath => text().nullable()();
+
   IntColumn get usageCount => integer().withDefault(const Constant(0))();
+
   DateTimeColumn get lastUsed => dateTime().nullable()();
+
   BlobColumn get icon => blob().nullable()(); // Store app icon bytes
 }
 
@@ -60,6 +69,26 @@ class AppDatabase extends _$AppDatabase {
   }
 
   // -----------------------------
+  // BATCH OPERATIONS (NEW)
+  // -----------------------------
+
+  /// Batch insert multiple apps efficiently
+  Future<void> batchInsertApps(List<AppsCompanion> appsList) async {
+    await batch((batch) {
+      for (final app in appsList) {
+        batch.insert(apps, app, mode: InsertMode.insertOrReplace);
+      }
+    });
+  }
+
+  /// Get single app by package name
+  Future<App?> getApp(String packageName) async {
+    return await (select(
+      apps,
+    )..where((a) => a.packageName.equals(packageName))).getSingleOrNull();
+  }
+
+  // -----------------------------
   // INSERT OR UPDATE
   // -----------------------------
   Future<void> insertOrUpdateApp(App app) =>
@@ -68,6 +97,10 @@ class AppDatabase extends _$AppDatabase {
   // -----------------------------
   // SELECT QUERIES
   // -----------------------------
+
+  // Stream of all apps for reactive UI updates
+  Stream<List<App>> getAllAppsStream() => select(apps).watch();
+
   Future<List<App>> getAllApps() => select(apps).get();
 
   Future<List<App>> getAppsByCategory(String? category) {
